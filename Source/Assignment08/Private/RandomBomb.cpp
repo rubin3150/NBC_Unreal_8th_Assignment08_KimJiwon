@@ -85,7 +85,6 @@ void ARandomBomb::Explode()
     {
         if (Actor && Actor->ActorHasTag("Player"))
         {
-            GEngine->AddOnScreenDebugMessage(-1, 2.f, FColor::Red, TEXT("Actor Found"));
             UGameplayStatics::ApplyDamage(Actor, DamageAmount, nullptr, this, UDamageType::StaticClass());
 
             // 폭발 반대 방향으로 넉백

@@ -24,6 +24,8 @@ public:
 	
 	UFUNCTION(BlueprintCallable, Category = "Spawning")
 	AActor* SpawnRandomItem();
+	UFUNCTION(BlueprintCallable)
+	AActor* SpawnAtRandomPoint(TSubclassOf<AActor> ActorClass);
 	
 	FItemSpawnRow* GetRandomItem() const;
 	AActor* SpawnItem(TSubclassOf<AActor> ItemClass);

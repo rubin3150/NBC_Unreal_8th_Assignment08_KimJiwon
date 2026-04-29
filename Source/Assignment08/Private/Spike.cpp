@@ -1,18 +1,15 @@
 #include "Spike.h"
 
 #include "MyCharacter.h"
+#include "SpawnVolume.h"
 #include "Components/BoxComponent.h"
 #include "Kismet/GameplayStatics.h"
 
 ASpike::ASpike()
 {
 	PrimaryActorTick.bCanEverTick = true;
-	PrimaryActorTick.bStartWithTickEnabled = false;
 	
 	DamageAmount = 10.0f;
-	RiseDuration = 5.0f;
-	ElapsedTime = 0.f;
-	bIsRising = false;
 	bCanDamage = false;
 
 	Scene = CreateDefaultSubobject<USceneComponent>(TEXT("Scene"));
@@ -26,56 +23,52 @@ ASpike::ASpike()
 	StaticMesh->SetupAttachment(Collision);
 }
 
-void ASpike::RiseUp(const FVector& InTargetPosition)
+void ASpike::BeginPlay()
 {
-	SetActorLocation(FVector(InTargetPosition.X, InTargetPosition.Y, -200.f));
+	Super::BeginPlay();
+	
+	TArray<AActor*> FoundVolumes;
+	UGameplayStatics::GetAllActorsOfClass(GetWorld(), ASpawnVolume::StaticClass(), FoundVolumes);
+	if (FoundVolumes.Num() > 0)
+		CachedSpawnVolume = Cast<ASpawnVolume>(FoundVolumes[0]);
+	
+	SetZ(-200.f);
+}
 
-	ElapsedTime = 0.f;
-	bIsRising = true;
-	bCanDamage = true;
-	SetActorTickEnabled(true);
+void ASpike::MoveToRandomPoint()
+{
+	FVector NewPos = CachedSpawnVolume ? CachedSpawnVolume->GetRandomPointInVolume() : GetActorLocation();
+	SetActorLocation(FVector(NewPos.X, NewPos.Y, -200.f));
+}
+
+void ASpike::SetZ(float Z)
+{
+	FVector Pos = GetActorLocation();
+	Pos.Z = Z;
+	SetActorLocation(Pos);
 }
 
 void ASpike::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
-
-	if (bIsRising)
-	{
-		ElapsedTime += DeltaTime;
-		float Alpha = FMath::Clamp(ElapsedTime / RiseDuration, 0.f, 1.f);
-
-		FVector Pos = GetActorLocation();
-		Pos.Z = FMath::Lerp(-200.f, 0.f, Alpha);
-		SetActorLocation(Pos);
-
-		if (Alpha >= 1.f)
-			bIsRising = false;
-	}
-
+	
 	if (bCanDamage)
-	{
-		TArray<AActor*> OverlappingActors;
-		Collision->GetOverlappingActors(OverlappingActors, AMyCharacter::StaticClass());
+		TryDamagePlayer();
+}
 
-		for (AActor* Actor : OverlappingActors)
+void ASpike::TryDamagePlayer()
+{
+	TArray<AActor*> OverlappingActors;
+	Collision->GetOverlappingActors(OverlappingActors, AMyCharacter::StaticClass());
+	
+	for (AActor* Actor : OverlappingActors)
+	{
+		if (Actor && Actor->ActorHasTag("Player"))
 		{
-			if (Actor && Actor->ActorHasTag("Player"))
-			{
-				UGameplayStatics::ApplyDamage(Actor, DamageAmount, nullptr, this, UDamageType::StaticClass());
-				ReturnToGround(); // 데미지 주자마자 내려감
-				break;
-			}
+			UGameplayStatics::ApplyDamage(Actor, DamageAmount, nullptr, this, UDamageType::StaticClass());
+			SetZ(-200.f);
+			bCanDamage = false;
+			break;
 		}
 	}
-}
-void ASpike::ReturnToGround()
-{
-	bIsRising = false;
-	bCanDamage = false;
-	SetActorTickEnabled(false);
-
-	FVector Pos = GetActorLocation();
-	Pos.Z = -200.f;
-	SetActorLocation(Pos);
 }

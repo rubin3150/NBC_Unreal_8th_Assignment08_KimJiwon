@@ -72,3 +72,9 @@ AActor* ASpawnVolume::SpawnItem(TSubclassOf<AActor> ItemClass)
 	AActor* SpawnedActor = GetWorld()->SpawnActor<AActor>(ItemClass, GetRandomPointInVolume(), FRotator::ZeroRotator);
 	return SpawnedActor;
 }
+
+AActor* ASpawnVolume::SpawnAtRandomPoint(TSubclassOf<AActor> ActorClass)
+{
+	if (!ActorClass) return nullptr;
+	return GetWorld()->SpawnActor<AActor>(ActorClass, GetRandomPointInVolume(), FRotator::ZeroRotator);
+}

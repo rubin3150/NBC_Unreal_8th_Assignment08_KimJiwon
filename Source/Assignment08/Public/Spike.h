@@ -5,14 +5,28 @@
 #include "Spike.generated.h"
 
 class UBoxComponent;
+class ASpawnVolume;
+
+UENUM()
+enum class ESpikeState : uint8
+{
+	Hidden,
+	Rising,
+	Active
+};
 
 UCLASS()
 class ASSIGNMENT08_API ASpike : public AActor
 {
 	GENERATED_BODY()
 	
-public:	
+protected:
+	virtual void BeginPlay() override;
+
+public:
 	ASpike();
+	
+	virtual void Tick(float DeltaTime) override;
 	
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Spike")
 	USceneComponent* Scene;
@@ -25,15 +39,13 @@ public:
 
 	UPROPERTY(EditAnywhere, Category = "Spike")
 	float DamageAmount;
-	
-	UPROPERTY(EditAnywhere, Category = "Spike")
-	float RiseDuration;
-	
-	float ElapsedTime;
-	bool bIsRising;
-	bool bCanDamage;
 
-	virtual void Tick(float DeltaTime) override;
-	void RiseUp(const FVector& InTargetPosition);
-	void ReturnToGround();
+	UPROPERTY()
+	ASpawnVolume* CachedSpawnVolume;
+	
+	bool bCanDamage;
+	
+	void MoveToRandomPoint();
+	void SetZ(float Z);
+	void TryDamagePlayer();
 };

@@ -1,13 +1,13 @@
 #include "MyGameState.h"
 
 #include "CoinItem.h"
-#include "EngineUtils.h"
 #include "MineItem.h"
 #include "MyCharacter.h"
 #include "MyGameInstance.h"
 #include "MyPlayerController.h"
 #include "SpawnVolume.h"
 #include "Spike.h"
+#include "RandomBomb.h"
 #include "Blueprint/UserWidget.h"
 #include "Kismet/GameplayStatics.h"
 #include "Components/RadialSlider.h"
@@ -15,13 +15,24 @@
 
 AMyGameState::AMyGameState()
 {
+	PrimaryActorTick.bCanEverTick = true;
+	
 	Score = 0;
 	SpawnedCoinCount = 0;
 	CollectedCoinCount = 0;
-	LevelItemCounts = { 50, 40, 30 };
-	LevelDurations = { 60.0f, 45.0f, 30.0f };
+	// WaveItemCounts = { 10, 15, 25 };
+	WaveDurations = { 60.0f, 45.0f, 30.0f };
+	TrapCounts = { 15, 20, 30 };
+	CurrentWaveIndex = 0;
 	CurrentLevelIndex = 0;
+	MaxWaves = 3;
 	MaxLevels = 3;
+	
+	SpikeRiseDuration = 5.0f;
+	SpikeActiveDuration = 5.0f;
+	SpikeHideDuration = 3.0f;
+	SpikeRiseElapsed = 0.f;
+	bSpikesRising = false;
 }
 
 void AMyGameState::BeginPlay()
@@ -33,6 +44,29 @@ void AMyGameState::BeginPlay()
 	GetWorldTimerManager().SetTimer(HUDUpdateTimerHandle, this, &AMyGameState::UpdateHUD, 0.1f, true);
 }
 
+void AMyGameState::Tick(float DeltaTime)
+{
+	Super::Tick(DeltaTime);
+	
+	if (!bSpikesRising) return;
+	
+	SpikeRiseElapsed += DeltaTime;
+	float Alpha = FMath::Clamp(SpikeRiseElapsed / SpikeRiseDuration, 0.f, 1.f);
+	float Z = FMath::Lerp(-200.f, 0.f, Alpha);
+	
+	for (ASpike* Spike : ActiveSpikes)
+		if (IsValid(Spike))
+			Spike->SetZ(Z);
+	
+	if (Alpha >= 1.f)
+	{
+		bSpikesRising = false;
+		for (ASpike* Spike : ActiveSpikes)
+			if (IsValid(Spike))
+				Spike->bCanDamage = true;
+	}
+}
+
 int32 AMyGameState::GetScore() const
 {
 	return Score;
@@ -40,11 +74,8 @@ int32 AMyGameState::GetScore() const
 
 void AMyGameState::AddScore(int32 Amount)
 {
-	if (UGameInstance* GameInstance = GetGameInstance())
-	{
-		if (UMyGameInstance* MyGameInstance = Cast<UMyGameInstance>(GameInstance))
-			MyGameInstance->AddToScore(Amount);
-	}
+	if (UMyGameInstance* MyGameInstance = Cast<UMyGameInstance>(GetGameInstance()))
+		MyGameInstance->AddToScore(Amount);
 }
 
 void AMyGameState::StartLevel()
@@ -52,110 +83,164 @@ void AMyGameState::StartLevel()
 	FString CurrentMap = GetWorld()->GetMapName();
 	if (CurrentMap.Contains("MenuLevel")) return;
 	
-	if (APlayerController* PlayerController = GetWorld()->GetFirstPlayerController())
-		if (AMyPlayerController* MyPlayerController = Cast<AMyPlayerController>(PlayerController))
-			MyPlayerController->ShowGameHUD();
+	if (AMyPlayerController* PC = GetMyPC())
+		PC->ShowGameHUD();
 	
-	if (UGameInstance* GameInstance = GetGameInstance())
-		if (UMyGameInstance* MyGameInstance = Cast<UMyGameInstance>(GameInstance))
-			CurrentLevelIndex = MyGameInstance->CurrentLevelIndex;
+	if (UMyGameInstance* MyGameInstance = Cast<UMyGameInstance>(GetGameInstance()))
+		CurrentLevelIndex = MyGameInstance->CurrentLevelIndex;
 	
+	CurrentWaveIndex = 0;
+	StartWave();
+}
+
+void AMyGameState::StartWave()
+{
 	// 웨이브 시작 알림
-	GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Yellow,FString::Printf(TEXT("Wave %d 시작!"), CurrentLevelIndex + 1));
+	GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Yellow,
+		FString::Printf(TEXT("Level %d - Wave %d 시작!"), CurrentLevelIndex + 1, CurrentWaveIndex + 1));
 	
 	SpawnedCoinCount = 0;
 	CollectedCoinCount = 0;
-	
+    
 	TArray<AActor*> FoundVolumes;
 	UGameplayStatics::GetAllActorsOfClass(GetWorld(), ASpawnVolume::StaticClass(), FoundVolumes);
 	
-	// 아이템 스폰 개수 50, 40, 30
-	const int32 ItemToSpawn = LevelItemCounts[CurrentLevelIndex]; 
-	GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Green, FString::Printf(TEXT("아이템 생성 개수: %d"), LevelItemCounts[CurrentLevelIndex]));
+	ASpawnVolume* SpawnVolume = (FoundVolumes.Num() > 0) ? Cast<ASpawnVolume>(FoundVolumes[0]) : nullptr;
+	if (!SpawnVolume) return;
+    
+	// 현재 웨이브의 아이템 개수
+	//const int32 ItemToSpawn = WaveItemCounts[CurrentWaveIndex];
+	const int32 ItemToSpawn = (CurrentLevelIndex * MaxWaves + CurrentWaveIndex + 1) * 10; // 아이템 개수를 웨이브마다 순차적으로 늘려서 밸런스 조절
+	GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Green,
+		FString::Printf(TEXT("아이템 생성 개수: %d"), ItemToSpawn));
+    
 	for (int32 i = 0; i < ItemToSpawn; ++i)
 	{
-		if (FoundVolumes.Num() > 0)
+		if (AActor* SpawnedActor = SpawnVolume->SpawnRandomItem(); SpawnedActor && SpawnedActor->IsA(ACoinItem::StaticClass()))
+			SpawnedCoinCount++;
+	}
+    
+	// 웨이브 2: 스파이크 스폰
+	if (CurrentWaveIndex == 1 && SpikeClass)
+	{
+		SpawnTraps(SpawnVolume, SpikeClass, TrapCounts[CurrentLevelIndex]);
+		TriggerSpikeRise();
+	
+		const float CycleTotal = SpikeRiseDuration + SpikeActiveDuration + SpikeHideDuration;
+		GetWorldTimerManager().SetTimer(SpikeRiseTimerHandle, this, &AMyGameState::TriggerSpikeRise, CycleTotal, true);
+	}
+    
+	// 웨이브 3: 랜덤 폭탄 스폰
+	if (CurrentWaveIndex == 2 && RandomBombClass)
+		SpawnTraps(SpawnVolume, RandomBombClass, TrapCounts[CurrentLevelIndex]);
+	
+	if (AMyPlayerController* PC = GetMyPC())
+		PC->SetHUDText(FName("Coin"), FString::Printf(TEXT("Coin: %d / %d"), CollectedCoinCount, SpawnedCoinCount));
+    
+	GetWorldTimerManager().SetTimer(LevelTimerHandle, this, &AMyGameState::OnLevelTimeUp, WaveDurations[CurrentWaveIndex], false);
+}
+
+void AMyGameState::SpawnTraps(ASpawnVolume* SpawnVolume, TSubclassOf<AActor> TrapClass, int32 Count)
+{
+	if (!SpawnVolume || !TrapClass) return;
+    
+	for (int32 i = 0; i < Count; ++i)
+	{
+		if (AActor* SpawnedTrap = SpawnVolume->SpawnAtRandomPoint(TrapClass))
 		{
-			if (ASpawnVolume* SpawnVolume = Cast<ASpawnVolume>(FoundVolumes[0]))
-			{
-				AActor* SpawnedActor = SpawnVolume->SpawnRandomItem();
-				if (SpawnedActor && SpawnedActor->IsA(ACoinItem::StaticClass()))
-					SpawnedCoinCount++;
-			}
+			SpawnedTraps.Add(SpawnedTrap);
+			if (ASpike* Spike = Cast<ASpike>(SpawnedTrap))
+				ActiveSpikes.Add(Spike);
 		}
 	}
-	
-	// 코인 개수 초기화
-	if (AMyPlayerController* PC = Cast<AMyPlayerController>(GetWorld()->GetFirstPlayerController()))
-		PC->SetHUDText(FName("Coin"), FString::Printf(TEXT("Coin: %d / %d"), CollectedCoinCount, SpawnedCoinCount));
-	
-	// 웨이브 제한 시간 60.0f, 45.0f, 30.0f
-	GetWorldTimerManager().SetTimer(
-		LevelTimerHandle, 
-		this, 
-		&AMyGameState::OnLevelTimeUp, 
-		LevelDurations[CurrentLevelIndex], 
-		false
-	);
+}
 
-	// 스파이크 추가
-	if (CurrentLevelIndex == 1)
+void AMyGameState::TriggerSpikeRise()
+{
+	for (ASpike* Spike : ActiveSpikes)
+		if (IsValid(Spike))
+			Spike->MoveToRandomPoint();
+	
+	SpikeRiseElapsed = 0.f;
+	bSpikesRising = true;
+    
+	GetWorldTimerManager().SetTimer(SpikeHideTimerHandle, this, &AMyGameState::TriggerSpikeHide,
+		SpikeRiseDuration + SpikeActiveDuration, false);
+    
+	if (AMyPlayerController* PC = GetMyPC())
+		PC->PlayHUDAnimation(FName("PlaySpikeAlertAnim"), FName("Spike"));
+}
+
+void AMyGameState::TriggerSpikeHide()
+{
+	for (ASpike* Spike : ActiveSpikes)
 	{
-		for (TActorIterator<ASpike> It(GetWorld()); It; ++It)
-			AllSpikes.Add(*It);
-
-		InitSpikePositions();
-		ActivateRandomSpikes();
-		
-		GetWorldTimerManager().SetTimer(
-			SpikeTimerHandle,
-			this,
-			&AMyGameState::ActivateRandomSpikes,
-			10.0f,
-			true
-		);
+		if (IsValid(Spike))
+		{
+			Spike->SetZ(-200.f);
+			Spike->bCanDamage = false;
+		}
 	}
 }
 
 void AMyGameState::OnLevelTimeUp()
 {
-	EndLevel();
+	EndWave();
 }
 
 void AMyGameState::OnCoinCollected()
 {
 	CollectedCoinCount++;
 	
-	if (AMyPlayerController* PC = Cast<AMyPlayerController>(GetWorld()->GetFirstPlayerController()))
+	if (AMyPlayerController* PC = GetMyPC())
 	{
-		FString Msg = FString::Printf(TEXT("Coin: %d / %d"), CollectedCoinCount, SpawnedCoinCount);
-		PC->SetHUDText(FName("Coin"), Msg);
+		PC->SetHUDText(FName("Coin"), FString::Printf(TEXT("Coin: %d / %d"), CollectedCoinCount, SpawnedCoinCount));
 		PC->PlayHUDAnimation(FName("PlayCoinCollectedAnim"));
 	}
 	
 	if (SpawnedCoinCount > 0 && CollectedCoinCount >= SpawnedCoinCount)
+		EndWave();
+}
+
+void AMyGameState::EndWave()
+{
+	GetWorldTimerManager().ClearTimer(LevelTimerHandle);
+	GetWorldTimerManager().ClearTimer(SpikeRiseTimerHandle);
+	GetWorldTimerManager().ClearTimer(SpikeHideTimerHandle);
+	bSpikesRising = false;
+	
+	// 함정 전부 정리
+	for (AActor* Trap : SpawnedTraps)
+		if (IsValid(Trap))
+			Trap->Destroy();
+	SpawnedTraps.Empty();
+	ActiveSpikes.Empty();
+	
+	// 아이템 전부 정리
+	TArray<AActor*> AllItems;
+	UGameplayStatics::GetAllActorsOfClass(GetWorld(), ABaseItem::StaticClass(), AllItems);
+	for (AActor* Item : AllItems)
+		if (IsValid(Item))
+			Item->Destroy();
+	
+	CurrentWaveIndex++;
+    
+	if (CurrentWaveIndex >= MaxWaves)
+	{
 		EndLevel();
+		return;
+	}
+    
+	StartWave();
 }
 
 void AMyGameState::EndLevel()
 {
-	GetWorldTimerManager().ClearTimer(LevelTimerHandle);
-	GetWorldTimerManager().ClearTimer(SpikeTimerHandle);
-	AllSpikes.Empty();
-	
-	TArray<AActor*> AllItems;
-	UGameplayStatics::GetAllActorsOfClass(GetWorld(), ABaseItem::StaticClass(), AllItems);
-	for (AActor* Item : AllItems)
-		Item->GetWorldTimerManager().ClearAllTimersForObject(Item);
-	
-	if (UGameInstance* GameInstance = GetGameInstance())
+	if (UMyGameInstance* MyGameInstance = Cast<UMyGameInstance>(GetGameInstance()))
 	{
-		if (UMyGameInstance* MyGameInstance = Cast<UMyGameInstance>(GameInstance))
-		{
-			AddScore(Score);
-			CurrentLevelIndex++;
-			MyGameInstance->CurrentLevelIndex = CurrentLevelIndex;
-		}
+		AddScore(Score);
+		CurrentLevelIndex++;
+		MyGameInstance->CurrentLevelIndex = CurrentLevelIndex;
 	}
 	
 	if (CurrentLevelIndex >= MaxLevels)
@@ -172,17 +257,16 @@ void AMyGameState::EndLevel()
 
 void AMyGameState::OnGameOver()
 {
-	if (APlayerController* PlayerController = GetWorld()->GetFirstPlayerController())
-		if (AMyPlayerController* MyPlayerController = Cast<AMyPlayerController>(PlayerController))
-		{
-			MyPlayerController->SetPause(true);
-			MyPlayerController->ShowMainMenu(true);
-		}
+	if (AMyPlayerController* PC = GetMyPC())
+	{
+		PC->SetPause(true);
+		PC->ShowMainMenu(true);
+	}
 }
 
 void AMyGameState::UpdateHUD()
 {
-	AMyPlayerController* PC = Cast<AMyPlayerController>(GetWorld()->GetFirstPlayerController());
+	AMyPlayerController* PC = GetMyPC();
 	if (!PC) return;
 
 	float RemainingTime = GetWorldTimerManager().GetTimerRemaining(LevelTimerHandle);
@@ -191,7 +275,7 @@ void AMyGameState::UpdateHUD()
 	if (UMyGameInstance* GI = Cast<UMyGameInstance>(GetGameInstance()))
 		PC->SetHUDText(FName("Score"), FString::Printf(TEXT("Score: %d"), GI->TotalScore));
 
-	PC->SetHUDText(FName("Level"), FString::Printf(TEXT("Level: %d"), CurrentLevelIndex + 1));
+	PC->SetHUDText(FName("Level"), FString::Printf(TEXT("Level %d : Wave %d"), CurrentLevelIndex + 1, CurrentWaveIndex + 1));
 	
 	// 디버프 슬라이더 갱신
 	AMyCharacter* Character = Cast<AMyCharacter>(PC->GetPawn());
@@ -217,36 +301,7 @@ void AMyGameState::UpdateHUD()
 	}
 }
 
-void AMyGameState::InitSpikePositions()
+AMyPlayerController* AMyGameState::GetMyPC() const
 {
-	SpikePositions.Empty();
-
-	const float XMin = -2390.f, XMax = 2390.f;
-	const float YMin = -2200.f, YMax = 2200.f;
-	const float Step = 200.f;
-
-	for (float X = XMin; X <= XMax; X += Step)
-		for (float Y = YMin; Y <= YMax; Y += Step)
-			SpikePositions.Add(FVector(X, Y, 0.f));
-}
-
-void AMyGameState::ActivateRandomSpikes()
-{
-	for (ASpike* Spike : AllSpikes)
-		if (IsValid(Spike))
-			Spike->ReturnToGround();
-
-	TArray<int32> Indices;
-	for (int32 i = 0; i < SpikePositions.Num(); i++)
-		Indices.Add(i);
-
-	for (int32 i = Indices.Num() - 1; i > 0; i--)
-		Indices.Swap(i, FMath::RandRange(0, i));
-
-	for (int32 i = 0; i < AllSpikes.Num(); i++)
-		if (IsValid(AllSpikes[i]))
-			AllSpikes[i]->RiseUp(SpikePositions[Indices[i]]);
-
-	if (AMyPlayerController* PC = Cast<AMyPlayerController>(GetWorld()->GetFirstPlayerController()))
-		PC->PlayHUDAnimation(FName("PlaySpikeAlertAnim"), FName("Spike"));
+	return Cast<AMyPlayerController>(GetWorld()->GetFirstPlayerController());
 }
